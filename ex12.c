@@ -56,36 +56,34 @@ void exitWithError(char *msg)
 }
 
 /*******************************************************************************
-* function name : parseConfigfile
-* input : configDT, config[3][161] 2d array to represent config file.
+* function name : getParsedConfiguration
+* input : configDT, placeholder string
 * output : -
-* explanation : parse the config file
+* explanation : parse the config file, and place the current raw in the config
+*               file in the placeholder.
 *******************************************************************************/
-void parseConfigfile(int configDT, char config[][161])
-{
-    int i;
-    char c[1];
+void getParsedConfiguration(int configFD, char *placeholder) {
     ssize_t check;
+    int j = 0;
+    char c[1];
+    char buffer[160];
 
-    for (i = 0; i < 3; i++) {
-        int j = 0; // length of each string
+    while((check = read(configFD, c, 1)) == 1) {
+        // error reading
+        if (check < 0)
+            exitWithError("Error reading");
 
-        while((check = read(configDT, c, 1)) == 1) {
-            // error reading
-            if (check < 0)
-                exitWithError("Error reading");
+        // we want to read until the \n
+        if (*c == '\n') break;
 
-            // we want to read until the \n
-            if (*c == '\n') break;
+        buffer[j] = *c;
 
-            config[i][j] = *c;
-
-            j++;
-        }
-
-        // to set an end to the string
-        config[i][j] = '\0';
+        j++;
     }
+
+    buffer[j] = '\0';
+
+    strcpy(placeholder, buffer);
 }
 
 /*******************************************************************************
@@ -172,6 +170,7 @@ EVALUATION run(char *inputFile, char *stdOutFile) {
 
     // first child process
     if (pid == 0) {
+        char buffer[300];
         // making the program get input by input file
         if ((dup2(inputFd, 0)) == -1)
             exitWithError("Error dup2");
@@ -180,7 +179,10 @@ EVALUATION run(char *inputFile, char *stdOutFile) {
         if ((dup2(sOutFd, 1)) == -1)
             exitWithError("Error dup2");
 
+        getcwd(buffer, 300);
+
         if (execlp("./a.out", "./a.out", NULL) < 0) {
+            puts(buffer);
             exitWithError("error running student a.out");
         }
         exit(1);
@@ -200,14 +202,13 @@ EVALUATION run(char *inputFile, char *stdOutFile) {
             result = FINISHED_RUNNING_ON_TIME;
         else{
             // no need for it to continue running
-            if (kill(pid, SIGTERM) == -1)
+            if (kill(pid, SIGSTOP) == -1)
                 exitWithError("kill failed");
             result = TIMEOUT;
         }
 
-
         // no need for the executable
-        if (unlink("a.out") == -1)
+        if ((unlink("a.out")) == -1)
             exitWithError("unlink error");
 
     } else {
@@ -313,6 +314,8 @@ void evaluateStudentWork(char* studentFolder, int* penalty, int depth, char* std
         // set penalty
         *penalty = depth;
 
+        printf("-----> %s \n", cFile);
+
         // compile the file and bring back results
         result = compile(cFile);
         if (result == COMPILATION_ERROR) {
@@ -387,16 +390,16 @@ void gradeStudent(EVAL_ADT * eval, int penalty, int resultsFD, char *stdName) {
         case MULTIPLE_DIRECTORIES: sprintf(evaluations, "%s,0,MULTIPLE_DIRECTORIES", stdName);
             break;
         case BAD_OUTPUT: sprintf(evaluations, "%s,0,BAD_OUTPUT", stdName);
-            break;
-        case SIMILAR_OUTPUT: sprintf(evaluations, "%s,%d,SIMILAR_OUTPUT", stdName, getPenalty(70, penalty));
             if (penalty > 0)
                 strcat(evaluations, ",WRONG_DIRECTORY");
             break;
-        case GREAT_JOB: sprintf(evaluations, "%s,%d", stdName, getPenalty(100, penalty));
+        case SIMILAR_OUTPUT: sprintf(evaluations, "%s,%d,SIMILLAR_OUTPUT", stdName, getPenalty(70, penalty));
             if (penalty > 0)
                 strcat(evaluations, ",WRONG_DIRECTORY");
-            else
-                strcat(evaluations, ",GREAT_JOB");
+            break;
+        case GREAT_JOB: sprintf(evaluations, "%s,%d,GREAT_JOB", stdName, getPenalty(100, penalty));
+            if (penalty > 0)
+                strcat(evaluations, ",WRONG_DIRECTORY");
             break;
         default: sprintf(evaluations, "ERROR");
     }
@@ -417,7 +420,7 @@ void gradeStudent(EVAL_ADT * eval, int penalty, int resultsFD, char *stdName) {
 int main(int argc, char** argv) {
 
     int configFiledt, resultsFD;
-    char configArr[3][161];
+    char outputPath[160], inputPath[160], rootPath[160];
     DIR* rootDir;
     struct dirent* studentDir;
     char currentPath[SIZE_MAX_MB] = {0}, tempOut[SIZE_MAX_MB] = {0};
@@ -431,7 +434,12 @@ int main(int argc, char** argv) {
     if (configFiledt < 0)
         exitWithError("Error opening config file");
 
-    parseConfigfile(configFiledt, &configArr);
+    // get 3 rows of config file
+    getParsedConfiguration(configFiledt, rootPath);
+    getParsedConfiguration(configFiledt, inputPath);
+    getParsedConfiguration(configFiledt, outputPath);
+
+    close(configFiledt);
 
     // create the results file at this position
     resultsFD = open("results.csv", O_TRUNC | O_CREAT | O_RDWR, 0666);
@@ -439,7 +447,7 @@ int main(int argc, char** argv) {
         exitWithError("Error opening results.csv");
 
     // open the root file of all the students
-    if ((rootDir = opendir(configArr[0])) == NULL)
+    if ((rootDir = opendir(rootPath)) == NULL)
         exitWithError("Error opening root dir");
 
     // get executable path and set it to the current path
@@ -450,9 +458,10 @@ int main(int argc, char** argv) {
     strcat(tempOut, "/tempOut.txt");
 
     // change working directory to the root directory
-    chdir(configArr[0]);
+    chdir(rootPath);
 
     // iterate over all users.
+    int counter = 0;
     while ((studentDir = readdir(rootDir)) != NULL) {
         // if the c file is not in the first directory
         int penalty = 0;
@@ -461,21 +470,27 @@ int main(int argc, char** argv) {
         results.evalArr[0] = NO_C_FILE;
         results.index = 0;
 
+        printf("1.%s\n", studentDir->d_name);
         if (isDir(studentDir)) {
-            evaluateStudentWork(studentDir->d_name, &penalty, 0, tempOut, configArr[1], configArr[2],
+            counter++;
+            printf("--> %s\n", studentDir->d_name);
+            evaluateStudentWork(studentDir->d_name, &penalty, 0, tempOut, inputPath, outputPath,
                                           currentPath, &results);
 
             gradeStudent(&results, penalty, resultsFD, studentDir->d_name);
-        }
 
+            printf("--> %s <-- \n", studentDir->d_name);
+        }
     }
 
+    printf("num of students: %d",counter);
+
     // clean
-    close(configFiledt);
     closedir(rootDir);
     close(resultsFD);
 
-    unlink(tempOut);
+    if((unlink(tempOut)) == -1)
+        exitWithError("unlink error");
 
     return 0;
 }
